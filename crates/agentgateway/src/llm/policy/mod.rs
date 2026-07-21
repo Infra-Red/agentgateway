@@ -727,9 +727,13 @@ impl Policy {
 					None => Ok(GuardrailOutcome::None),
 				}
 			},
-			RequestGuardKind::BedrockGuardrails(bg) => {
-				Self::apply_bedrock_guardrails_request(req, claims.clone(), client, &guard.rejection, bg)
-					.await
+			RequestGuardKind::BedrockGuardrails(_) => {
+				// The ApplyGuardrail standalone API returns guarded:0 for all content in
+				// eu-central-1 and false-positives on system prompts without qualifier
+				// exclusion. Detection is handled via guardContent blocks on the Converse
+				// request (MAP-51). The BedrockGuardrails config is still read from
+				// prompt_guard by the Bedrock conversion layer to populate guardrailConfig.
+				Ok(GuardrailOutcome::None)
 			},
 			RequestGuardKind::GoogleModelArmor(gma) => {
 				match Self::apply_google_model_armor_request(
@@ -777,28 +781,6 @@ impl Policy {
 		}
 	}
 
-	async fn apply_bedrock_guardrails_request(
-		req: &mut dyn RequestType,
-		claims: Option<Claims>,
-		client: &PolicyClient,
-		rej: &RequestRejection,
-		guardrails: &BedrockGuardrails,
-	) -> anyhow::Result<GuardrailOutcome> {
-		let resp = bedrock_guardrails::send_request(req, claims.clone(), client, guardrails).await?;
-		if resp.is_blocked() {
-			Ok(GuardrailOutcome::Rejected(rej.as_response()))
-		} else if resp.is_anonymized() {
-			let output_texts = resp.output_texts();
-			let mut msgs = req.get_messages();
-			for (msg, text) in msgs.iter_mut().zip(output_texts) {
-				msg.content = text.into();
-			}
-			req.set_messages(msgs);
-			Ok(GuardrailOutcome::Masked)
-		} else {
-			Ok(GuardrailOutcome::None)
-		}
-	}
 
 	async fn apply_bedrock_guardrails_response(
 		resp: &mut dyn ResponseType,

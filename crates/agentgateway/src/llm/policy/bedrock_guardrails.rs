@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::auth::{AwsAuth, BackendAuth};
 use crate::http::jwt::Claims;
-use crate::llm::RequestType;
 use crate::llm::bedrock::AwsRegion;
 use crate::llm::policy::BedrockGuardrails;
 use crate::proxy::httpproxy::PolicyClient;
@@ -132,32 +131,6 @@ impl BedrockGuardrails {
 }
 
 /// Send a request to the Bedrock Guardrails ApplyGuardrail API for request content
-pub async fn send_request(
-	req: &mut dyn RequestType,
-	claims: Option<Claims>,
-	client: &PolicyClient,
-	guardrails: &BedrockGuardrails,
-) -> anyhow::Result<ApplyGuardrailResponse> {
-	let content = req
-		.get_messages()
-		.into_iter()
-		.map(|m| GuardrailContentBlock {
-			text: GuardrailTextBlock {
-				text: m.content.to_string(),
-			},
-		})
-		.collect_vec();
-
-	send_guardrail_request(
-		client,
-		claims.clone(),
-		guardrails,
-		GuardrailSource::Input,
-		content,
-	)
-	.await
-}
-
 /// Send a request to the Bedrock Guardrails ApplyGuardrail API for response content
 pub async fn send_response(
 	content: Vec<String>,
