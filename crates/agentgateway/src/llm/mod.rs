@@ -1146,7 +1146,33 @@ impl AIProvider {
 				},
 				AIProvider::Anthropic(_) => req.to_anthropic()?,
 				AIProvider::Bedrock(p) => req.to_bedrock(
-					p,
+					// If the prompt guard policy carries a BedrockGuardrails entry, forward
+					// its identifier/version as an inline guardrailConfig on the Converse
+					// request. The standalone ApplyGuardrail API does not activate the
+					// PROMPT_ATTACK classifier (guarded=0 in eu-central-1); the inline
+					// Converse guardrailConfig does (MAP-51).
+					&{
+						let mut p = p.clone();
+						if p.guardrail_identifier.is_none() {
+							if let Some(bg) = policies
+								.and_then(|pol| pol.prompt_guard.as_ref())
+								.and_then(|pg| {
+									pg.request.iter().find_map(|g| {
+										if let policy::RequestGuardKind::BedrockGuardrails(bg) = &g.kind {
+											Some(bg)
+										} else {
+											None
+										}
+									})
+								})
+							{
+								p.guardrail_identifier = Some(bg.guardrail_identifier.clone());
+								p.guardrail_version = Some(bg.guardrail_version.clone());
+								tracing::debug!(guardrail_id = %bg.guardrail_identifier, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig (MAP-51)");
+							}
+						}
+						p
+					},
 					Some(&parts.headers),
 					policies.and_then(|p| p.prompt_caching.as_ref()),
 				)?,
