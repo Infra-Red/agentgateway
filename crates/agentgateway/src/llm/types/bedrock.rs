@@ -20,6 +20,71 @@ pub enum ContentBlock {
 	ToolUse(ToolUseBlock),
 	ReasoningContent(ReasoningContentBlock),
 	CachePoint(CachePointBlock),
+	/// Selective guardrail evaluation block (MAP-51).
+	/// When any guardContent block is present, the guardrail evaluates ONLY
+	/// guardContent blocks. Without qualifiers, all active policies including
+	/// PROMPT_ATTACK are applied. With qualifiers, only contextual grounding runs.
+	GuardContent(GuardrailConverseContentBlock),
+}
+
+/// Content block for selective guardrail evaluation via the Converse API.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct GuardrailConverseContentBlock {
+	pub text: GuardrailConverseTextBlock,
+}
+
+/// Text inside a guardContent block.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct GuardrailConverseTextBlock {
+	pub text: String,
+	/// Qualifiers scope evaluation to specific policies:
+	/// - no qualifiers: all active policies including PROMPT_ATTACK
+	/// - "grounding_source": contextual grounding only (NOT PROMPT_ATTACK)
+	/// - "query": contextual grounding only (NOT PROMPT_ATTACK)
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub qualifiers: Vec<String>,
+}
+
+impl ContentBlock {
+	/// Build a guardContent block from a ToolResultBlock for PROMPT_ATTACK detection.
+	///
+	/// Uses NO qualifiers so all active policies including PROMPT_ATTACK evaluate it.
+	/// Qualifiers like "grounding_source" only activate the contextual grounding
+	/// policy and bypass PROMPT_ATTACK — the opposite of what we want here (MAP-51).
+	///
+	/// Must be placed AFTER the ToolResult block in the same message to satisfy
+	/// Bedrock's toolUse/toolResult pairing validation.
+	pub fn tool_result_as_guard_content(block: &ToolResultBlock) -> Option<Self> {
+		let text: String = block
+			.content
+			.iter()
+			.filter_map(|c| {
+				if let ToolResultContentBlock::Text(t) = c {
+					Some(t.as_str())
+				} else {
+					None
+				}
+			})
+			.collect::<Vec<_>>()
+			.join("\n");
+		if text.is_empty() {
+			return None;
+		}
+		Some(ContentBlock::GuardContent(GuardrailConverseContentBlock {
+			text: GuardrailConverseTextBlock { text, qualifiers: vec![] },
+		}))
+	}
+
+	/// Wrap a plain text block in guardContent for PROMPT_ATTACK evaluation.
+	///
+	/// Required because once any guardContent block exists in the messages,
+	/// Bedrock only evaluates guardContent blocks — plain text blocks are skipped.
+	/// So user messages must also be wrapped when tool results carry guardContent.
+	pub fn text_as_guard_content(text: String) -> Self {
+		ContentBlock::GuardContent(GuardrailConverseContentBlock {
+			text: GuardrailConverseTextBlock { text, qualifiers: vec![] },
+		})
+	}
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
@@ -291,6 +356,12 @@ pub struct GuardrailConfiguration {
 	/// Whether to enable trace output from the guardrail
 	#[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
 	pub trace: Option<String>,
+	/// Controls whether guardrail assessment completes before streaming starts.
+	/// sync: block until guardrail finishes before returning any chunks.
+	/// async: stream response while guardrail runs in background.
+	/// Only applies to ConverseStream requests; ignored by Converse.
+	#[serde(rename = "streamProcessingMode", skip_serializing_if = "Option::is_none")]
+	pub stream_processing_mode: Option<String>,
 }
 
 #[derive(Clone, Serialize, Debug, PartialEq)]

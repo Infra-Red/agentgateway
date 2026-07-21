@@ -408,7 +408,10 @@ pub mod from_completions {
 		content
 	}
 
-	fn tool_content_to_bedrock(msg: &completions::RequestToolMessage) -> Vec<bedrock::ContentBlock> {
+	fn tool_content_to_bedrock(
+		msg: &completions::RequestToolMessage,
+		with_guardrail: bool,
+	) -> Vec<bedrock::ContentBlock> {
 		let content = match &msg.content {
 			completions::RequestToolMessageContent::Text(text) => {
 				vec![bedrock::ToolResultContentBlock::Text(text.to_string())]
@@ -425,15 +428,22 @@ pub mod from_completions {
 		if content.is_empty() {
 			return Vec::new();
 		}
-		vec![bedrock::ContentBlock::ToolResult(
-			bedrock::ToolResultBlock {
-				tool_use_id: msg.tool_call_id.clone(),
-				content,
-				// OpenAI tool messages do not carry explicit success/error status.
-				// Keep this unset rather than asserting success.
-				status: None,
-			},
-		)]
+		let tr = bedrock::ToolResultBlock {
+			tool_use_id: msg.tool_call_id.clone(),
+			content,
+			// OpenAI tool messages do not carry explicit success/error status.
+			// Keep this unset rather than asserting success.
+			status: None,
+		};
+		let mut blocks = vec![bedrock::ContentBlock::ToolResult(tr)];
+		if with_guardrail {
+			if let bedrock::ContentBlock::ToolResult(tr) = &blocks[0] {
+				if let Some(guard) = bedrock::ContentBlock::tool_result_as_guard_content(tr) {
+					blocks.push(guard);
+				}
+			}
+		}
+		blocks
 	}
 
 	/// translate an OpenAI completions request to a Bedrock converse  request
@@ -492,7 +502,7 @@ pub mod from_completions {
 					}
 				},
 				completions::RequestMessage::Tool(tool_result) => {
-					let content = tool_content_to_bedrock(tool_result);
+					let content = tool_content_to_bedrock(tool_result, provider.guardrail_identifier.is_some());
 					if content.is_empty() {
 						None
 					} else {
@@ -533,6 +543,10 @@ pub mod from_completions {
 				guardrail_identifier: identifier.to_string(),
 				guardrail_version: version.to_string(),
 				trace: Some("enabled".to_string()),
+				// Block streaming chunks until the guardrail has assessed the full
+				// input. Without this, ASYNCHRONOUS mode may return model output
+				// before a blocked assessment can suppress it.
+				stream_processing_mode: Some("sync".to_string()),
 			})
 		} else {
 			None
@@ -1134,7 +1148,15 @@ pub mod from_messages {
 						text,
 						cache_control,
 						..
-					}) => (bedrock::ContentBlock::Text(text), cache_control.is_some()),
+					}) => {
+						// When a guardrail is active, also emit a guardContent block for this
+						// user text. Once any guardContent exists in the messages, Bedrock only
+						// evaluates guardContent blocks — plain Text blocks are skipped entirely.
+						if provider.guardrail_identifier.is_some() {
+							content.push(bedrock::ContentBlock::text_as_guard_content(text.clone()));
+						}
+						(bedrock::ContentBlock::Text(text), cache_control.is_some())
+					},
 					messages::ContentBlock::Image(messages::ContentImageBlock {
 						source,
 						cache_control,
@@ -1250,6 +1272,18 @@ pub mod from_messages {
 				};
 
 				content.push(bedrock_block);
+
+				// When a guardrail is configured, append a guardContent block AFTER the
+				// ToolResult so Bedrock evaluates the tool output for PROMPT_ATTACK.
+				// Must come after ToolResult to pass Bedrock toolUse/toolResult validation.
+				// No qualifiers: qualifiers route to contextual grounding only (not PROMPT_ATTACK).
+				if provider.guardrail_identifier.is_some() {
+					if let Some(bedrock::ContentBlock::ToolResult(tr)) = content.last() {
+						if let Some(guard) = bedrock::ContentBlock::tool_result_as_guard_content(tr) {
+							content.push(guard);
+						}
+					}
+				}
 
 				if has_cache_control && cache_points_used < 4 {
 					content.push(bedrock::ContentBlock::CachePoint(
@@ -1381,6 +1415,10 @@ pub mod from_messages {
 				guardrail_identifier: identifier.to_string(),
 				guardrail_version: version.to_string(),
 				trace: Some("enabled".to_string()),
+				// Block streaming chunks until the guardrail has assessed the full
+				// input. Without this, ASYNCHRONOUS mode may return model output
+				// before a blocked assessment can suppress it.
+				stream_processing_mode: Some("sync".to_string()),
 			})
 		} else {
 			None
@@ -1948,19 +1986,26 @@ pub mod from_responses {
 							.join("\n"),
 					};
 
+					let tr_block = bedrock::ToolResultBlock {
+						tool_use_id: output.call_id,
+						content: vec![bedrock::ToolResultContentBlock::Text(output_text)],
+						// Responses tool outputs do not carry explicit success/error metadata.
+						// Leave Bedrock status unset instead of assuming success.
+						status: None,
+					};
+					let mut resp_content = vec![bedrock::ContentBlock::ToolResult(tr_block)];
+					if provider.guardrail_identifier.is_some() {
+						if let bedrock::ContentBlock::ToolResult(tr) = &resp_content[0] {
+							if let Some(guard) = bedrock::ContentBlock::tool_result_as_guard_content(tr) {
+								resp_content.push(guard);
+							}
+						}
+					}
 					helpers::push_or_merge_message(
 						&mut messages,
 						bedrock::Message {
 							role: bedrock::Role::User,
-							content: vec![bedrock::ContentBlock::ToolResult(
-								bedrock::ToolResultBlock {
-									tool_use_id: output.call_id,
-									content: vec![bedrock::ToolResultContentBlock::Text(output_text)],
-									// Responses tool outputs do not carry explicit success/error metadata.
-									// Leave Bedrock status unset instead of assuming success.
-									status: None,
-								},
-							)],
+							content: resp_content,
 						},
 					);
 				},
@@ -2143,6 +2188,10 @@ pub mod from_responses {
 				guardrail_identifier: identifier.to_string(),
 				guardrail_version: version.to_string(),
 				trace: Some("enabled".to_string()),
+				// Block streaming chunks until the guardrail has assessed the full
+				// input. Without this, ASYNCHRONOUS mode may return model output
+				// before a blocked assessment can suppress it.
+				stream_processing_mode: Some("sync".to_string()),
 			})
 		} else {
 			None
@@ -2993,7 +3042,8 @@ impl ConverseResponseAdapter {
 				},
 				bedrock::ContentBlock::Image(_)
 				| bedrock::ContentBlock::ToolResult(_)
-				| bedrock::ContentBlock::CachePoint(_) => {
+				| bedrock::ContentBlock::CachePoint(_)
+				| bedrock::ContentBlock::GuardContent(_) => {
 					continue;
 				},
 			}
@@ -3109,7 +3159,8 @@ impl ConverseResponseAdapter {
 				},
 				bedrock::ContentBlock::Image(_)
 				| bedrock::ContentBlock::ToolResult(_)
-				| bedrock::ContentBlock::CachePoint(_) => {
+				| bedrock::ContentBlock::CachePoint(_)
+				| bedrock::ContentBlock::GuardContent(_) => {
 					// Skip these in responses (not part of output)
 				},
 			}
@@ -3225,6 +3276,7 @@ impl ConverseResponseAdapter {
 				)),
 				bedrock::ContentBlock::ToolResult(_) => None, // Skip tool results in responses
 				bedrock::ContentBlock::CachePoint(_) => None, // Skip cache points - they're metadata only
+				bedrock::ContentBlock::GuardContent(_) => None, // Skip guardContent - only used for guardrail input evaluation
 			}
 		}
 		let content: Vec<messagest::ContentBlock> = self
