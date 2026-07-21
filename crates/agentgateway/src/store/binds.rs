@@ -260,7 +260,10 @@ impl BackendPolicies {
 			backend_auth: other.backend_auth.or(self.backend_auth),
 			a2a: other.a2a.or(self.a2a),
 			llm_provider: other.llm_provider.or(self.llm_provider),
-			llm: other.llm.or(self.llm),
+			llm: match (other.llm, self.llm) {
+				(Some(a), Some(b)) => Some(LLMRequestPolicies::merge_llm_policies(&a, &b)),
+				(a, b) => a.or(b),
+			},
 			// TODO: is this right??
 			mcp_authorization: other.mcp_authorization.or(self.mcp_authorization),
 			mcp_authentication: other.mcp_authentication.or(self.mcp_authentication),
