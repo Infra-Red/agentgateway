@@ -1085,6 +1085,23 @@ impl AIProvider {
 		{
 			llm_info.prompt = Some(req.get_messages().into());
 		}
+		// When a Bedrock guardrail is configured, force non-streaming so the buffered
+		// response path runs and BedrockGuardrails response guards can mask PII.
+		// The streaming evaluator does not support BedrockGuardrails masking — masked
+		// outcomes are silently discarded (streaming_guardrails.rs:GuardrailOutcome::Masked).
+		if matches!(self, AIProvider::Bedrock(_)) && llm_info.streaming {
+			let has_bedrock_guardrail = policies
+				.and_then(|pol| pol.prompt_guard.as_ref())
+				.map(|pg| {
+					pg.request.iter().any(|g| matches!(g.kind, policy::RequestGuardKind::BedrockGuardrails(_)))
+						|| pg.response.iter().any(|g| matches!(g.kind, policy::ResponseGuardKind::BedrockGuardrails(_)))
+				})
+				.unwrap_or(false);
+			if has_bedrock_guardrail {
+				llm_info.streaming = false;
+			}
+		}
+
 		parts.extensions.insert(llm_info.clone());
 
 		let request_model = llm_info.request_model.as_str();
