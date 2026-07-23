@@ -1085,10 +1085,15 @@ impl AIProvider {
 		{
 			llm_info.prompt = Some(req.get_messages().into());
 		}
-		// Force non-streaming when any response guard that supports masking is configured.
-		// The streaming evaluator silently discards GuardrailOutcome::Masked — masked
-		// outcomes only take effect on the buffered response path. This applies to both
-		// BedrockGuardrails (PII anonymisation) and Webhook (custom masking logic).
+		// Force non-streaming when a BedrockGuardrails response guard is configured.
+		// The streaming evaluator silently discards GuardrailOutcome::Masked — PII
+		// masking only takes effect on the buffered response path.
+		//
+		// Note: Webhook response guards are intentionally excluded from this check.
+		// Forcing non-streaming converts the response to JSON while the caller expects
+		// SSE (when stream=true), breaking multi-turn agent flows. Webhook response
+		// masking on streaming paths requires streaming response buffering support in
+		// streaming_guardrails.rs (GuardrailOutcome::Masked currently discarded).
 		if matches!(self, AIProvider::Bedrock(_)) && llm_info.streaming {
 			let needs_buffered = policies
 				.and_then(|pol| pol.prompt_guard.as_ref())
@@ -1098,7 +1103,6 @@ impl AIProvider {
 					))
 					|| pg.response.iter().any(|g| matches!(g.kind,
 						policy::ResponseGuardKind::BedrockGuardrails(_)
-						| policy::ResponseGuardKind::Webhook(_)
 					))
 				})
 				.unwrap_or(false);
