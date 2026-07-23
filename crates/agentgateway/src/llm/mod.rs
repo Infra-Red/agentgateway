@@ -759,11 +759,6 @@ impl AIProvider {
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
-		tracing::info!(
-			has_policies = policies.is_some(),
-			has_prompt_guard = policies.and_then(|p| p.prompt_guard.as_ref()).is_some(),
-			"process_messages_request called"
-		);
 		let (parts, req) = self
 			.read_body_and_default_model::<types::messages::Request>(policies, req, log)
 			.await?;
@@ -1090,19 +1085,24 @@ impl AIProvider {
 		{
 			llm_info.prompt = Some(req.get_messages().into());
 		}
-		// When a Bedrock guardrail is configured, force non-streaming so the buffered
-		// response path runs and BedrockGuardrails response guards can mask PII.
-		// The streaming evaluator does not support BedrockGuardrails masking — masked
-		// outcomes are silently discarded (streaming_guardrails.rs:GuardrailOutcome::Masked).
+		// Force non-streaming when any response guard that supports masking is configured.
+		// The streaming evaluator silently discards GuardrailOutcome::Masked — masked
+		// outcomes only take effect on the buffered response path. This applies to both
+		// BedrockGuardrails (PII anonymisation) and Webhook (custom masking logic).
 		if matches!(self, AIProvider::Bedrock(_)) && llm_info.streaming {
-			let has_bedrock_guardrail = policies
+			let needs_buffered = policies
 				.and_then(|pol| pol.prompt_guard.as_ref())
 				.map(|pg| {
-					pg.request.iter().any(|g| matches!(g.kind, policy::RequestGuardKind::BedrockGuardrails(_)))
-						|| pg.response.iter().any(|g| matches!(g.kind, policy::ResponseGuardKind::BedrockGuardrails(_)))
+					pg.request.iter().any(|g| matches!(g.kind,
+						policy::RequestGuardKind::BedrockGuardrails(_)
+					))
+					|| pg.response.iter().any(|g| matches!(g.kind,
+						policy::ResponseGuardKind::BedrockGuardrails(_)
+						| policy::ResponseGuardKind::Webhook(_)
+					))
 				})
 				.unwrap_or(false);
-			if has_bedrock_guardrail {
+			if needs_buffered {
 				llm_info.streaming = false;
 			}
 		}
@@ -1201,7 +1201,7 @@ impl AIProvider {
 							if let Some((id, version)) = bedrock_guardrail {
 								p.guardrail_identifier = Some(id.clone());
 								p.guardrail_version = Some(version);
-								tracing::info!(guardrail_id = %id, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig");
+								tracing::debug!(guardrail_id = %id, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig");
 							}
 						}
 						p
