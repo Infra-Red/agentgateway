@@ -759,6 +759,11 @@ impl AIProvider {
 		tokenize: bool,
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<RequestResult, AIError> {
+		tracing::info!(
+			has_policies = policies.is_some(),
+			has_prompt_guard = policies.and_then(|p| p.prompt_guard.as_ref()).is_some(),
+			"process_messages_request called"
+		);
 		let (parts, req) = self
 			.read_body_and_default_model::<types::messages::Request>(policies, req, log)
 			.await?;
