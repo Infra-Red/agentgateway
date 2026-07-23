@@ -1196,7 +1196,7 @@ impl AIProvider {
 							if let Some((id, version)) = bedrock_guardrail {
 								p.guardrail_identifier = Some(id.clone());
 								p.guardrail_version = Some(version);
-								tracing::debug!(guardrail_id = %id, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig");
+								tracing::info!(guardrail_id = %id, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig");
 							}
 						}
 						p
