@@ -1171,21 +1171,32 @@ impl AIProvider {
 					&{
 						let mut p = p.clone();
 						if p.guardrail_identifier.is_none() {
-							if let Some(bg) = policies
+							// Check request guards first, then response guards — both carry the
+							// guardrail identifier needed for the inline Converse guardrailConfig.
+							// Backends with response-only guardrails (e.g. PII masking) also need
+							// guardrailConfig set so Bedrock evaluates the output path.
+							let bedrock_guardrail = policies
 								.and_then(|pol| pol.prompt_guard.as_ref())
 								.and_then(|pg| {
 									pg.request.iter().find_map(|g| {
 										if let policy::RequestGuardKind::BedrockGuardrails(bg) = &g.kind {
-											Some(bg)
+											Some((bg.guardrail_identifier.clone(), bg.guardrail_version.clone()))
 										} else {
 											None
 										}
 									})
-								})
-							{
-								p.guardrail_identifier = Some(bg.guardrail_identifier.clone());
-								p.guardrail_version = Some(bg.guardrail_version.clone());
-								tracing::debug!(guardrail_id = %bg.guardrail_identifier, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig (MAP-51)");
+									.or_else(|| pg.response.iter().find_map(|g| {
+										if let policy::ResponseGuardKind::BedrockGuardrails(bg) = &g.kind {
+											Some((bg.guardrail_identifier.clone(), bg.guardrail_version.clone()))
+										} else {
+											None
+										}
+									}))
+								});
+							if let Some((id, version)) = bedrock_guardrail {
+								p.guardrail_identifier = Some(id.clone());
+								p.guardrail_version = Some(version);
+								tracing::debug!(guardrail_id = %id, "forwarding BedrockGuardrails policy as inline Converse guardrailConfig");
 							}
 						}
 						p
