@@ -157,6 +157,17 @@ pub fn get_messages_helper(
 						.iter()
 						.filter_map(|part| match part {
 							ContentPart::Text { text, .. } => Some(text.as_str()),
+							// For Unknown content parts (e.g. tool_result blocks), try to
+							// extract text from nested "content" arrays so guardrail webhooks
+							// can evaluate tool output for prompt injection (MAP-51).
+							ContentPart::Unknown(v) => v.get("content")
+								.and_then(|c| c.as_str().or_else(|| {
+									c.as_array()?.iter().find_map(|item| {
+										if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+											item.get("text").and_then(|t| t.as_str())
+										} else { None }
+									})
+								})),
 							_ => None,
 						})
 						.fold(String::new(), |mut acc, s| {
